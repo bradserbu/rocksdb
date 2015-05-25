@@ -686,30 +686,36 @@ void DBImpl::PurgeObsoleteFiles(const JobContext& state) {
       // evict from cache
       TableCache::Evict(table_cache_.get(), number);
       fname = TableFileName(db_options_.db_paths, number, path_id);
-      event_logger_.Log() << "job" << state.job_id << "event"
-                          << "table_file_deletion"
-                          << "file_number" << number;
     } else {
       fname = ((type == kLogFile) ?
           db_options_.wal_dir : dbname_) + "/" + to_delete;
     }
 
-#ifdef ROCKSDB_LITE
-    Status s = env_->DeleteFile(fname);
-    Log(InfoLogLevel::DEBUG_LEVEL, db_options_.info_log,
-        "[JOB %d] Delete %s type=%d #%" PRIu64 " -- %s\n", state.job_id,
-        fname.c_str(), type, number, s.ToString().c_str());
-#else   // not ROCKSDB_LITE
+#ifndef ROCKSDB_LITE
     if (type == kLogFile && (db_options_.WAL_ttl_seconds > 0 ||
-                             db_options_.WAL_size_limit_MB > 0)) {
+                              db_options_.WAL_size_limit_MB > 0)) {
       wal_manager_.ArchiveWALFile(fname, number);
-    } else {
-      Status s = env_->DeleteFile(fname);
+      continue;
+    }
+#endif  // !ROCKSDB_LITE
+    auto file_deletion_status = env_->DeleteFile(fname);
+    if (file_deletion_status.ok()) {
       Log(InfoLogLevel::DEBUG_LEVEL, db_options_.info_log,
           "[JOB %d] Delete %s type=%d #%" PRIu64 " -- %s\n", state.job_id,
-          fname.c_str(), type, number, s.ToString().c_str());
+          fname.c_str(), type, number,
+          file_deletion_status.ToString().c_str());
+    } else {
+      Log(InfoLogLevel::ERROR_LEVEL, db_options_.info_log,
+          "[JOB %d] Failed to delete %s type=%d #%" PRIu64 " -- %s\n",
+          state.job_id, fname.c_str(), type, number,
+          file_deletion_status.ToString().c_str());
     }
-#endif  // ROCKSDB_LITE
+    if (type == kTableFile) {
+      event_logger_.Log() << "job" << state.job_id << "event"
+                          << "table_file_deletion"
+                          << "file_number" << number
+                          << "status" << file_deletion_status.ToString();
+    }
   }
 
   // Delete old info log files.
@@ -1155,22 +1161,21 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
           cfd->ioptions()->compression_opts, paranoid_file_checks, Env::IO_HIGH,
           &table_properties);
       LogFlush(db_options_.info_log);
+      Log(InfoLogLevel::DEBUG_LEVEL, db_options_.info_log,
+          "[%s] [WriteLevel0TableForRecovery]"
+          " Level-0 table #%" PRIu64 ": %" PRIu64 " bytes %s",
+          cfd->GetName().c_str(), meta.fd.GetNumber(), meta.fd.GetFileSize(),
+          s.ToString().c_str());
+
+      // output to event logger
+      if (s.ok()) {
+        EventLoggerHelpers::LogTableFileCreation(
+            &event_logger_, job_id, meta.fd.GetNumber(), meta.fd.GetFileSize(),
+            table_properties);
+      }
       mutex_.Lock();
     }
   }
-  Log(InfoLogLevel::DEBUG_LEVEL, db_options_.info_log,
-      "[%s] [WriteLevel0TableForRecovery]"
-      " Level-0 table #%" PRIu64 ": %" PRIu64 " bytes %s",
-      cfd->GetName().c_str(), meta.fd.GetNumber(), meta.fd.GetFileSize(),
-      s.ToString().c_str());
-
-  // output to event logger
-  if (s.ok()) {
-    EventLoggerHelpers::LogTableFileCreation(
-        &event_logger_, job_id, meta.fd.GetNumber(), meta.fd.GetFileSize(),
-        table_properties);
-  }
-
   ReleaseFileNumberFromPendingOutputs(pending_outputs_inserted_elem);
 
   // Note that if file_size is zero, the file has been deleted and
@@ -3820,7 +3825,7 @@ Status DBImpl::CheckConsistency() {
   }
 }
 
-Status DBImpl::GetDbIdentity(std::string& identity) {
+Status DBImpl::GetDbIdentity(std::string& identity) const {
   std::string idfilename = IdentityFileName(dbname_);
   unique_ptr<SequentialFile> idfile;
   const EnvOptions soptions;
@@ -4191,12 +4196,11 @@ void DumpRocksDBBuildVersion(Logger * log) {
 #if !defined(IOS_CROSS_COMPILE)
   // if we compile with Xcode, we don't run build_detect_vesion, so we don't
   // generate util/build_version.cc
-  Log(InfoLogLevel::INFO_LEVEL, log,
+  Warn(log,
       "RocksDB version: %d.%d.%d\n", ROCKSDB_MAJOR, ROCKSDB_MINOR,
       ROCKSDB_PATCH);
-  Log(InfoLogLevel::INFO_LEVEL, log, "Git sha %s", rocksdb_build_git_sha);
-  Log(InfoLogLevel::INFO_LEVEL, log, "Compile date %s",
-      rocksdb_build_compile_date);
+  Warn(log, "Git sha %s", rocksdb_build_git_sha);
+  Warn(log, "Compile date %s", rocksdb_build_compile_date);
 #endif
 }
 

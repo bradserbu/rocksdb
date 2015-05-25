@@ -497,17 +497,19 @@ CLEAN_FILES += t LOG $(TMPD)
 watch-log:
 	watch --interval=0 'sort -k7,7nr -k4,4gr LOG|$(quoted_perl_command)'
 
-# If GNU parallel is installed, run the tests in parallel,
+# If J != 1 and GNU parallel is installed, run the tests in parallel,
 # via the check_0 rule above.  Otherwise, run them sequentially.
 check: all
-	$(AM_V_GEN)case $$(parallel --gnu --help 2>/dev/null) in	\
-	  *'GNU Parallel'*)						\
-	    t=$$($(test_names));					\
-	    $(MAKE) T="$$t" TMPD=$(TMPD) check_0;;			\
-	  *)								\
-	    for t in $(TESTS); do					\
-	      echo "===== Running $$t"; ./$$t || exit 1; done;;		\
-	esac
+	$(AM_V_GEN)if test "$(J)" != 1                                  \
+	    && (parallel --gnu --help 2>/dev/null) |                    \
+	        grep -q 'GNU Parallel';                                 \
+	then                                                            \
+	    t=$$($(test_names));                                        \
+	    $(MAKE) T="$$t" TMPD=$(TMPD) check_0;                       \
+	else                                                            \
+	    for t in $(TESTS); do                                       \
+	      echo "===== Running $$t"; ./$$t || exit 1; done;          \
+	fi
 	rm -rf $(TMPD)
 
 check_some: $(SUBSET) ldb_tests
@@ -939,7 +941,7 @@ rocksdbjavastatic: $(java_libobjects) libz.a libbz2.a libsnappy.a liblz4.a
 	$(CXX) $(CXXFLAGS) -I./java/. $(JAVA_INCLUDE) -shared -fPIC \
 	  -o ./java/target/$(ROCKSDBJNILIB) $(JNI_NATIVE_SOURCES) \
 	  $(java_libobjects) $(COVERAGEFLAGS) \
-	  libz.a libbz2.a libsnappy.a liblz4.a
+	  libz.a libbz2.a libsnappy.a liblz4.a $(LDFLAGS)
 	cd java/target;strip -S -x $(ROCKSDBJNILIB)
 	cd java;jar -cf target/$(ROCKSDB_JAR) HISTORY*.md
 	cd java/target;jar -uf $(ROCKSDB_JAR) $(ROCKSDBJNILIB)
